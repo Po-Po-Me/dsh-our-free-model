@@ -12,9 +12,11 @@
  *    admission decision the kernel applies to its `/api` routes (trust fence
  *    plus browser-auth cookie), so the plugin is never weaker than the app;
  * 2. a structural replica of that fence for compositions without the service:
- *    loopback host only, no cross-site fetches, and an `Origin`/`Referer` that
- *    matches the `Host` authority whenever the client supplies one, with a
- *    narrow exception for the desktop's dsh-app://app relay Referer.
+ *    loopback host only (plus an explicit allowlist for published
+ *    deployments, see `OFM_MANAGEMENT_ALLOWED_HOSTS` below), no cross-site
+ *    fetches, and an `Origin`/`Referer` that matches the `Host` authority
+ *    whenever the client supplies one, with a narrow exception for the
+ *    desktop's dsh-app://app relay Referer.
  *
  * @module src/trust.js
  */
@@ -133,10 +135,49 @@ export function structuralRejection(req) {
   return structuralReason(req) === undefined ? undefined : 403
 }
 
+/**
+ * Authorities allowed to reach this surface from outside loopback.
+ *
+ * The fence refuses a routable Host header because that is the DNS-rebinding
+ * shape (an attacker domain resolving to this machine). A deployment that is
+ * deliberately published — e.g. behind an FRP tunnel at `kr-1.qwq.fan:12130` —
+ * needs exactly that host admitted, so it opts in here:
+ *
+ *   OFM_MANAGEMENT_ALLOWED_HOSTS="kr-1.qwq.fan:12130,panel.example"
+ *
+ * Comma-separated entries; `host:port` pins the port, a bare `host` matches any
+ * port. Empty/unset keeps the historical loopback-only behavior. The allowlist
+ * only relaxes the *Host* admission — `sec-fetch-site: cross-site`, invalid
+ * Origin schemes and an Origin/Referer that matches neither the Host nor an
+ * allowlisted authority are still refused, and the management session cookie
+ * remains mandatory.
+ */
+function allowedAuthorities() {
+  const raw = process.env.OFM_MANAGEMENT_ALLOWED_HOSTS ?? ''
+  const out = []
+  for (const piece of raw.split(',')) {
+    const entry = piece.trim()
+    if (!entry) continue
+    const authority = authorityOf(entry, 'http')
+    if (authority === null) continue
+    out.push({ hostname: authority.hostname, port: /:\d+$/.test(entry) ? authority.port : null })
+  }
+  return out
+}
+
+/** Is this request authority covered by the opt-in allowlist? */
+function authorityAllowed(authority, allowed) {
+  if (authority === null) return false
+  return allowed.some(entry => entry.hostname === authority.hostname
+    && (entry.port === null || entry.port === authority.port))
+}
+
 /** Return a fixed reason without exposing caller-supplied strings. */
 function structuralReason(req) {
+  const allowed = allowedAuthorities()
   const host = authorityOf(req.headers.host, 'http')
-  if (host === null || !LOOPBACK_NAMES.has(host.hostname)) return 'host-not-loopback'
+  if (host === null) return 'host-not-loopback'
+  if (!LOOPBACK_NAMES.has(host.hostname) && !authorityAllowed(host, allowed)) return 'host-not-loopback'
   const site = String(req.headers['sec-fetch-site'] ?? '').toLowerCase()
   if (site === 'cross-site') return 'cross-site'
   for (const header of ['origin', 'referer']) {
@@ -153,7 +194,8 @@ function structuralReason(req) {
     if (authority === null) return `${header}-invalid`
     // The web server speaks plain http on a loopback bind, so an Origin that
     // claims https — or any other scheme — is not this page.
-    if (authority.scheme !== host.scheme || authority.hostname !== host.hostname || authority.port !== host.port) return `${header}-mismatch`
+    const same = authority.scheme === host.scheme && authority.hostname === host.hostname && authority.port === host.port
+    if (!same && !authorityAllowed(authority, allowed)) return `${header}-mismatch`
   }
   return undefined
 }

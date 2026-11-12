@@ -81,6 +81,41 @@ check('other desktop pages, credentials and ports are refused', () => {
   ]) assert.equal(structuralRejection(req({ host: '127.0.0.1:8080', referer })), 403)
 })
 
+// ── the published-deployment allowlist (2026-11-12) ──────────────────────────
+// The fence refuses a routable Host header (DNS rebinding). A deployment that
+// is deliberately published behind a tunnel opts specific authorities in via
+// OFM_MANAGEMENT_ALLOWED_HOSTS; everything else must keep being refused.
+check('an allowlisted public host is admitted and everything else stays refused', () => {
+  const previous = process.env.OFM_MANAGEMENT_ALLOWED_HOSTS
+  process.env.OFM_MANAGEMENT_ALLOWED_HOSTS = 'kr-1.qwq.fan:12130,panel.example'
+  try {
+    assert.equal(structuralRejection(req({ host: 'kr-1.qwq.fan:12130' })), undefined)
+    assert.equal(structuralRejection(req({ host: 'kr-1.qwq.fan:12130', origin: 'http://kr-1.qwq.fan:12130' })), undefined)
+    assert.equal(structuralRejection(req({ host: 'kr-1.qwq.fan:12130', referer: 'http://kr-1.qwq.fan:12130/settings' })), undefined)
+    // A bare host entry matches any port.
+    assert.equal(structuralRejection(req({ host: 'panel.example:8080' })), undefined)
+    // A pinned port does not leak to siblings.
+    assert.equal(structuralRejection(req({ host: 'kr-1.qwq.fan:9999' })), 403)
+    // Cross-site, foreign Origin and unlisted hosts stay refused.
+    assert.equal(structuralRejection(req({ host: 'kr-1.qwq.fan:12130', 'sec-fetch-site': 'cross-site' })), 403)
+    assert.equal(structuralRejection(req({ host: 'kr-1.qwq.fan:12130', origin: 'http://evil.example:12130' })), 403)
+    assert.equal(structuralRejection(req({ host: 'other.example:12130' })), 403)
+    assert.equal(structuralRejection(req({})), 403)
+  } finally {
+    if (previous === undefined) delete process.env.OFM_MANAGEMENT_ALLOWED_HOSTS
+    else process.env.OFM_MANAGEMENT_ALLOWED_HOSTS = previous
+  }
+})
+check('without the allowlist a public host is still refused', () => {
+  const previous = process.env.OFM_MANAGEMENT_ALLOWED_HOSTS
+  delete process.env.OFM_MANAGEMENT_ALLOWED_HOSTS
+  try {
+    assert.equal(structuralRejection(req({ host: 'kr-1.qwq.fan:12130' })), 403)
+  } finally {
+    if (previous !== undefined) process.env.OFM_MANAGEMENT_ALLOWED_HOSTS = previous
+  }
+})
+
 // ── the connection-service bridge ────────────────────────────────────────────
 check('a mounted connection service decides', () => {
   assert.equal(rejectionFor(req({ host: '127.0.0.1:8080' }), { admit: () => ({ peer: {} }) }), undefined)
